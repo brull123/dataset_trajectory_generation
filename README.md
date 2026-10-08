@@ -45,22 +45,24 @@ python3 generate_trajectories.py /path/to/world_config.yaml \
 The trajectory map is placed in its own figure: it contains the horizontal
 safety polygon, both paths, and heading arrows. A separate diagnostics figure
 contains altitude profiles and vertical safety limits, synchronized inter-UAV
-distance with the minimum highlighted, signed relative X/Y/Z velocity,
-3D velocity and acceleration magnitudes, and unwrapped heading profiles for
+distance with the minimum highlighted, signed relative X/Y/Z velocity and its
+3D magnitude, 3D velocity and acceleration magnitudes, and unwrapped heading profiles for
 both UAVs. Acceleration uses the same finite
 differences as the dynamic constraint verifier. `--plot overview.png` saves the
 map as `overview.png` and diagnostics as `overview_diagnostics.png`; use
 `--show-plot` to open both figures interactively.
 
-For a plotted random-walk trajectory, the map also overlays the RRT planning
-samples, highlighted spline-control points, and the planning camera's
+Add `--plot-rrt` to a plotted random-walk trajectory to overlay the RRT
+planning samples, highlighted spline-control points, and the planning camera's
 horizontal FOV plus its minimum and maximum target-distance bounds.
 
 When a constraints profile is active (`--constraints` or `--platform`), the
 velocity diagnostics also show the applicable combined horizontal/vertical
 speed envelope. When a path exceeds a dynamic limit, the generator preserves
 its spatial path and extends its duration until every enabled speed,
-acceleration, jerk, snap, and heading constraint is satisfied.
+acceleration, jerk, snap, and heading constraint is satisfied. When there is
+headroom, it also resamples that same spatial path to the shortest duration
+that still passes every active constraint.
 
 ## Command-line parameter reference
 
@@ -111,6 +113,7 @@ times are in seconds.
 | `--constraints PATH` | unset | all patterns | MRS ConstraintManager YAML file used to check both generated trajectories before files are written. With `--platform`, the bundled `constraints/mrs_default.yaml` is used when this option is omitted. |
 | `--constraint-profile NAME` | `fast` (`medium` for moving random walk) | constraint checking | Named constraints profile to read from `--constraints`. Has no effect unless a constraints file or platform is supplied. |
 | `--plot [PATH]` | disabled | all patterns | Save a visualization. With no path, writes `trajectories.png` under `--output-dir`; a relative supplied path is also resolved under that directory. |
+| `--plot-rrt` | disabled | random-walk plots | Overlay RRT samples, selected spline controls, planning FOV, and target-distance bounds. Requires `--plot` or `--show-plot`. |
 | `--show-plot` | disabled | all patterns | Open the visualization interactively in addition to any file requested with `--plot`. |
 
 Options for another pattern may be present on the command line but are ignored.
@@ -210,7 +213,10 @@ subsequent position controls independently sample the full allowed distance
 range. An RRT-style planner grows collision- and FOV-valid samples through
 the visible volume, then chooses a forward-biased route through distinct
 frontier nodes as spline controls so the target explores more of the available
-space without repeatedly reversing direction.
+space without repeatedly reversing direction. It starts at an intermediate
+range, visits the closest sampled point midway, and finishes at the farthest.
+Every fourth intermediate control favors a shorter lateral step, introducing
+occasional tighter turns.
 Dynamic verification can extend the duration while recreating
 the same seeded spatial curve; the example above passes the default `fast`
 profile in the requested 500 s.

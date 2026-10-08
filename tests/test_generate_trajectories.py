@@ -92,6 +92,12 @@ safety_area:
         self.assertEqual(args.placement_direction, "east")
         self.assertEqual(args.boundary_offset, 2.0)
 
+    def test_rrt_plot_overlay_is_opt_in(self):
+        args = parse_args(["world.yaml"])
+        self.assertFalse(args.plot_rrt)
+        args = parse_args(["world.yaml", "--plot-rrt"])
+        self.assertTrue(args.plot_rrt)
+
     def test_directional_margins_override_legacy_shared_margin(self):
         args = parse_args(
             [
@@ -163,7 +169,7 @@ safety_area:
             self.assertEqual(distance_axes.get_title(), "Inter-UAV distance")
             self.assertIn("minimum = 2.00 m", distance_axes.get_legend_handles_labels()[1])
             self.assertEqual(relative_axes.get_title(), "Relative velocity (UAV 2 − UAV 1)")
-            self.assertEqual(len(relative_axes.lines), 4)
+            self.assertEqual(len(relative_axes.lines), 5)
             self.assertTrue(
                 all(len(line.get_xdata()) == len(trajectories[0]) - 1 for line in relative_axes.lines[:3])
             )
@@ -443,9 +449,9 @@ safety_area:
                 abs(math.degrees(math.atan2(dz, math.hypot(dx, dy)))),
                 24.0 + 1e-8,
             )
-        # The RRT route begins near the closest reachable sample and ends near
-        # the farthest one, so it spans the useful target-distance volume.
-        self.assertAlmostEqual(distances[0], 5.0)
+        # The route begins at an intermediate range, reaches the nearest sample
+        # later, and ends at the farthest one.
+        self.assertGreater(distances[0], 5.0 + 0.1)
         self.assertAlmostEqual(min(distances), 5.0)
         self.assertGreater(max(distances), 15.0)
         self.assertLessEqual(max(distances), 25.0 + 1e-8)

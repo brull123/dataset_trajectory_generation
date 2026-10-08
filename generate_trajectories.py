@@ -1339,17 +1339,39 @@ def generate_static_camera_random_walk(
             depths.append(depths[parent_index] + 1)
 
         # Use the RRT nodes as a space-filling frontier, rather than following
-        # one tree branch (which can alternate between two directions). Anchor
-        # the route at the closest and farthest reachable samples, so the spline
-        # spans the plausible distance volume before normalizing to min distance.
+        # one tree branch (which can alternate between two directions). Start
+        # from an intermediate range, visit the closest reachable sample later,
+        # and finish at the farthest reachable sample.
         nearest_index = min(range(len(tree)), key=lambda index: observer_distance(tree[index]))
         farthest_index = max(range(len(tree)), key=lambda index: observer_distance(tree[index]))
-        waypoints = [tree[nearest_index]]
+        node_distances = [observer_distance(point) for point in tree]
+        intermediate_range = (node_distances[nearest_index] + node_distances[farthest_index]) / 2.0
+        start_index = min(
+            (
+                index
+                for index in range(len(tree))
+                if index not in {nearest_index, farthest_index}
+            ),
+            key=lambda index: abs(node_distances[index] - intermediate_range),
+            default=nearest_index,
+        )
+        waypoints = [tree[start_index]]
         available = [
             index for index in range(len(tree))
-            if index not in {nearest_index, farthest_index}
+            if index not in {start_index, nearest_index, farthest_index}
         ]
+        nearest_control_index = random_waypoints // 2
+        nearest_control_repetitions = min(3, random_waypoints - 2)
         while available and len(waypoints) < random_waypoints - 1:
+            if len(waypoints) == nearest_control_index:
+                # Repeating an interior cubic-B-spline control creates the
+                # required knot multiplicity for the curve to reach the close
+                # approach, rather than merely being pulled toward it.
+                waypoints.extend(
+                    [tree[nearest_index]]
+                    * min(nearest_control_repetitions, random_waypoints - 1 - len(waypoints))
+                )
+                continue
             current = waypoints[-1]
             candidates = [
                 index for index in available if edge_is_valid(current, tree[index])
@@ -1365,6 +1387,7 @@ def generate_static_camera_random_walk(
                 ) / selected_maximum
                 step_score = min(1.0, step / rrt_step)
                 direction_score = 1.0
+                turn_score = 0.0
                 if len(waypoints) >= 2:
                     previous = waypoints[-2]
                     incoming = tuple(current[axis] - previous[axis] for axis in range(3))
@@ -1375,6 +1398,20 @@ def generate_static_camera_random_walk(
                             incoming[axis] * outgoing[axis] for axis in range(3)
                         ) / (incoming_length * step)
                         direction_score = (cosine + 1.0) / 2.0
+                        # Favor a lateral direction for intentional tight turns;
+                        # perpendicular motion scores 1 while a reversal or
+                        # straight continuation scores 0.
+                        turn_score = 1.0 - abs(cosine)
+                if len(waypoints) % 4 == 0:
+                    # Every fourth control deliberately seeks a shorter lateral
+                    # step. The spatial-novelty term still prevents a loop.
+                    near_step_score = 1.0 - min(1.0, step / (0.55 * rrt_step))
+                    return (
+                        0.35 * spatial_novelty
+                        + 0.20 * step_score
+                        + 0.25 * turn_score
+                        + 0.20 * near_step_score
+                    )
                 return 0.50 * spatial_novelty + 0.30 * step_score + 0.20 * direction_score
 
             selected = max(candidates, key=frontier_score)
@@ -1963,6 +2000,18 @@ def visualize_trajectories(
             relative_axes.plot(
                 distance_times[1:], component, color=color, linewidth=2, label=label
             )
+        relative_velocity_magnitudes = [
+            math.sqrt(sum(component[sample] ** 2 for component in relative_velocity_components))
+            for sample in range(synchronized_count - 1)
+        ]
+        relative_axes.plot(
+            distance_times[1:],
+            relative_velocity_magnitudes,
+            color="black",
+            linestyle="--",
+            linewidth=2,
+            label="|v₂ − v₁|",
+        )
     distance_axes.set_title("Inter-UAV distance")
     distance_axes.set_xlabel("time [s]")
     distance_axes.set_ylabel("distance [m]")
@@ -2272,6 +2321,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         const=Path("trajectories.png"),
         help="save a visualization, optionally with a filename (default: trajectories.png)",
     )
+    parser.add_argument(
+        "--plot-rrt",
+        action="store_true",
+        help="overlay RRT samples, spline controls, FOV, and range bounds on a random-walk plot",
+    )
     parser.add_argument("--show-plot", action="store_true", help="display the visualization interactively")
     args = parser.parse_args(argv)
     if args.constraint_profile is None:
@@ -2386,6 +2440,39 @@ def _verify_trajectories(
     ]
 
 
+def _resample_to_fastest_valid_duration(
+    area: SafetyArea,
+    args: argparse.Namespace,
+    longest_valid_duration: float,
+    constraints: DynamicConstraints,
+) -> tuple[float, tuple[list[tuple[float, float, float, float]], ...], list[ConstraintVerification]]:
+    """Resample one spatial path at the fastest duration allowed by all limits."""
+    longest_sample_count = math.floor(longest_valid_duration / args.dt + 1e-9) + 1
+    minimum_sample_count = 5  # Derivative verification needs through snap.
+    if longest_sample_count <= minimum_sample_count:
+        trajectories = _generate_from_args(area, args, longest_valid_duration)
+        return (
+            longest_valid_duration,
+            trajectories,
+            _verify_trajectories(trajectories, args.dt, constraints),
+        )
+
+    low, high = minimum_sample_count, longest_sample_count
+    while low < high:
+        sample_count = (low + high) // 2
+        duration = (sample_count - 1) * args.dt
+        trajectories = _generate_from_args(area, args, duration)
+        results = _verify_trajectories(trajectories, args.dt, constraints)
+        if all(result.passed for result in results):
+            high = sample_count
+        else:
+            low = sample_count + 1
+
+    duration = (low - 1) * args.dt
+    trajectories = _generate_from_args(area, args, duration)
+    return duration, trajectories, _verify_trajectories(trajectories, args.dt, constraints)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -2395,7 +2482,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         trajectories = _generate_from_args(area, args, actual_duration)
         rrt_visualization = (
             RRTVisualization()
-            if (args.plot is not None or args.show_plot)
+            if args.plot_rrt
+            and (args.plot is not None or args.show_plot)
             and args.pattern in {"dataset-random-walk-static", "dataset-random-walk-moving"}
             else None
         )
@@ -2423,6 +2511,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 trajectories = _generate_from_args(area, args, actual_duration)
                 verification_results = _verify_trajectories(
                     trajectories, args.dt, dynamic_constraints
+                )
+            if all(result.passed for result in verification_results):
+                actual_duration, trajectories, verification_results = (
+                    _resample_to_fastest_valid_duration(
+                        area, args, actual_duration, dynamic_constraints
+                    )
                 )
             violation_lines: list[str] = []
             violation_count = sum(len(result.violations) for result in verification_results)
@@ -2507,6 +2601,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"Duration automatically extended from {args.duration:g} s to "
             f"{actual_duration:g} s to satisfy dynamic constraints"
+        )
+    elif actual_duration < args.duration - 1e-9:
+        print(
+            f"Duration resampled from {args.duration:g} s to {actual_duration:g} s "
+            "to use the available dynamic-constraint headroom"
         )
     print(f"Trajectories: {paths[0]}, {paths[1]}")
     print(f"Loader config: {config_path}")
