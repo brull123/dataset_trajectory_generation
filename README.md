@@ -33,14 +33,34 @@ Add `--plot` to also create `generated/trajectories.png`:
 python3 generate_trajectories.py /path/to/world_config.yaml --plot
 ```
 
+To place a completed trajectory near a particular safety-area border, add a
+world-frame direction and a standoff. For example, this places it toward the
+south border while retaining the normal 0.5 m margin plus 3 m of extra offset:
+
+```bash
+python3 generate_trajectories.py /path/to/world_config.yaml \
+  --placement-direction south --boundary-offset 3
+```
+
 The trajectory map is placed in its own figure: it contains the horizontal
 safety polygon, both paths, and heading arrows. A separate diagnostics figure
 contains altitude profiles and vertical safety limits, synchronized inter-UAV
-distance with the minimum highlighted, 3D velocity and acceleration magnitudes,
-and unwrapped heading profiles for both UAVs. Acceleration uses the same finite
+distance with the minimum highlighted, signed relative X/Y/Z velocity,
+3D velocity and acceleration magnitudes, and unwrapped heading profiles for
+both UAVs. Acceleration uses the same finite
 differences as the dynamic constraint verifier. `--plot overview.png` saves the
 map as `overview.png` and diagnostics as `overview_diagnostics.png`; use
 `--show-plot` to open both figures interactively.
+
+For a plotted random-walk trajectory, the map also overlays the RRT planning
+samples, highlighted spline-control points, and the planning camera's
+horizontal FOV plus its minimum and maximum target-distance bounds.
+
+When a constraints profile is active (`--constraints` or `--platform`), the
+velocity diagnostics also show the applicable combined horizontal/vertical
+speed envelope. After extending a path if necessary, the generator resamples
+it to the shortest duration that satisfies every enabled speed, acceleration,
+jerk, snap, and heading constraint.
 
 ## Command-line parameter reference
 
@@ -77,13 +97,17 @@ times are in seconds.
 | `--random-seed INTEGER` | `1` | random-walk dataset patterns | Reproducible random seed. Change it to create different smooth paths. |
 | `--random-waypoints COUNT` | `20` | random-walk dataset patterns | Number of spatially separated controls used by the cubic B-spline. Must be at least four; larger values increase path variety and typically require more duration. |
 | `--static-camera-placement NAME` | `circle` | `dataset-random-walk-static` | Select `circle` for the maximum inscribed-circle placement or `edge` for the previous nearest-boundary placement. |
-| `--static-camera-circle-clearance METRES` | `7.5` | circle static camera | Required clearance from the safety boundary when sizing the maximum inscribed camera circle. Must be at least `--margin`. |
+| `--static-camera-circle-clearance METRES` | `7.5` | circle static camera | Required clearance from the safety boundary when sizing the maximum inscribed camera circle. Must be at least `--horizontal-margin`. |
 | `--static-camera-circle-point NAME` | `north` | circle static camera | Camera point on the circle: `north`, `northeast`, `east`, `southeast`, `south`, `southwest`, `west`, or `northwest`. |
-| `--static-camera-inset METRES` | `5` | edge static camera | Distance from the nearest boundary into the safety area for `--static-camera-placement edge`. Must fit inside the area and be at least `--margin`. |
+| `--static-camera-inset METRES` | `5` | edge static camera | Distance from the nearest boundary into the safety area for `--static-camera-placement edge`. Must fit inside the area and be at least `--horizontal-margin`. |
 | `--camera-heading DEGREES` | automatic | `dataset-random-walk-static` | World-frame look direction override. If omitted, the camera points to the inscribed-circle center or, for edge placement, toward the field interior. The generator rejects headings whose FOV cannot contain the requested target path. |
 | `--moving-camera-radius METRES` | `1.0` | `dataset-random-walk-moving` | Maximum horizontal displacement of the filming UAV's smooth random walk. It is intentionally small relative to target motion. |
 | `--moving-camera-heading-walk DEGREES` | `12` | `dataset-random-walk-moving` | Maximum deviation from the filming UAV's initial look direction during its smooth bounded heading random walk. |
-| `--margin METRES` | `0.5` | all patterns | Minimum clearance from the horizontal polygon boundary. Dataset trajectories also apply it to the minimum and maximum altitude. |
+| `--margin METRES` | `0.5` | all patterns | Backward-compatible shared safety clearance. It supplies both directional margins unless they are set separately. |
+| `--horizontal-margin METRES` | `--margin` | all patterns | Minimum clearance from the horizontal safety polygon. This is also the clearance used for boundary placement. |
+| `--vertical-margin METRES` | `--margin` | all patterns | Minimum clearance from `min_z` and `max_z`. |
+| `--placement-direction NAME` | `center` | all patterns | After generation, first center the combined trajectory mean in the largest inscribed safety-area circle, then translate both trajectories toward `north`, `northeast`, `east`, `southeast`, `south`, `southwest`, `west`, or `northwest`. Directions use the world frame: east is +x and north is +y. `center` leaves trajectories unchanged. |
+| `--boundary-offset METRES` | `0` | with placement direction | Additional standoff from the selected boundary, beyond `--horizontal-margin`. The trajectories are shifted together, so their timing and relative geometry are unchanged. |
 | `--constraints PATH` | unset | all patterns | MRS ConstraintManager YAML file used to check both generated trajectories before files are written. With `--platform`, the bundled `constraints/mrs_default.yaml` is used when this option is omitted. |
 | `--constraint-profile NAME` | `fast` (`medium` for moving random walk) | constraint checking | Named constraints profile to read from `--constraints`. Has no effect unless a constraints file or platform is supplied. |
 | `--plot [PATH]` | disabled | all patterns | Save a visualization. With no path, writes `trajectories.png` under `--output-dir`; a relative supplied path is also resolved under that directory. |
@@ -183,7 +207,10 @@ distance. Twenty spatial
 controls create more maneuvers by default, while a separate unwrapped heading
 spline produces independent smooth attitude variation. Its first point and all
 subsequent position controls independently sample the full allowed distance
-range, while a novelty score favors differing positions and apparent scales.
+range. An RRT-style planner grows collision- and FOV-valid samples through
+the visible volume, then chooses a forward-biased route through distinct
+frontier nodes as spline controls so the target explores more of the available
+space without repeatedly reversing direction.
 Dynamic verification can extend the duration while recreating
 the same seeded spatial curve; the example above passes the default `fast`
 profile in the requested 500 s.

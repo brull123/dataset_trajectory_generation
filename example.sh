@@ -1,14 +1,17 @@
 python3 generate_trajectories.py worlds/world_temesvar_field_2.yaml \
       	--platform platforms/x500.yaml \
       	--pattern dataset-random-walk-moving  \
-       	--static-camera-circle-clearance 10 \
+       	--static-camera-circle-clearance 5 \
       	--static-camera-circle-point west\
       	--minimum-distance 5.0\
-       	--maximum-distance 60 \
+       	--maximum-distance 30.0 \
        	--random-seed 36 \
 	--show-plot\
+	--plot \
+	--horizontal-margin 5.0 \
        	--duration 300 \
 	--constraint-profile medium\
-       	--moving-camera-radius 10\
+       	--moving-camera-radius 2.5\
        	--random-waypoints 30 \
-	--output-dir temesvar_2_west
+	--output-dir temesvar_2_west \
+	--placement-direction southwest

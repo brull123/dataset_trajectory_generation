@@ -80,6 +80,19 @@ class ConstraintVerification:
         return not self.violations
 
 
+@dataclass
+class RRTVisualization:
+    """Planning data rendered with a plotted random-walk trajectory."""
+
+    points: list[tuple[float, float, float]] | None = None
+    spline_controls: list[tuple[float, float, float]] | None = None
+    observer_xy: tuple[float, float] | None = None
+    observer_heading: float | None = None
+    horizontal_fov: float | None = None
+    minimum_distance: float | None = None
+    maximum_distance: float | None = None
+
+
 def _find_mapping(node: Any, key: str) -> dict[str, Any] | None:
     """Find the first nested mapping named *key* (supports ROS1 and ROS2 YAML)."""
     if not isinstance(node, dict):
@@ -449,13 +462,15 @@ def generate(
     duration: float,
     separation: float,
     margin: float,
+    vertical_margin: float | None = None,
 ) -> tuple[list[tuple[float, float, float, float]], ...]:
     if dt < 0.01:
         raise ConfigurationError("dt must be at least 0.01 s for the MRS MpcTracker")
     if duration < dt:
         raise ConfigurationError("duration must be at least one dt")
-    if separation <= 0.0 or margin < 0.0:
-        raise ConfigurationError("separation must be positive and margin cannot be negative")
+    if separation <= 0.0:
+        raise ConfigurationError("separation must be positive")
+    vertical_margin = _vertical_margin(margin, vertical_margin)
 
     center, clearance = safest_point(area.polygon)
     usable_radius = clearance - margin
@@ -467,6 +482,8 @@ def generate(
         )
     half_length = min(2.0, 0.8 * math.sqrt(usable_radius**2 - half_separation**2))
     altitude = (area.min_z + area.max_z) / 2.0
+    if not area.min_z + vertical_margin <= altitude <= area.max_z - vertical_margin:
+        raise ConfigurationError("vertical safety area is smaller than twice the vertical margin")
     count = math.floor(duration / dt + 1e-9) + 1
     trajectories: list[list[tuple[float, float, float, float]]] = [[], []]
     for index in range(count):
@@ -480,7 +497,10 @@ def generate(
 
     for trajectory in trajectories:
         for x, y, z, _ in trajectory:
-            if not _inside((x, y), area.polygon) or not area.min_z <= z <= area.max_z:
+            if not (
+                _inside((x, y), area.polygon)
+                and area.min_z + vertical_margin <= z <= area.max_z - vertical_margin
+            ):
                 raise RuntimeError("internal error: generated point lies outside the safety area")
     return tuple(trajectories)
 
@@ -493,6 +513,7 @@ def generate_straight_and_helix(
     helix_radius: float,
     helix_turns: float,
     margin: float,
+    vertical_margin: float | None = None,
 ) -> tuple[list[tuple[float, float, float, float]], ...]:
     """Generate a straight follower and a leading UAV flying a 3D helix.
 
@@ -510,8 +531,7 @@ def generate_straight_and_helix(
         raise ConfigurationError("helix radius must be positive")
     if helix_turns <= 0.0:
         raise ConfigurationError("helix turns must be positive")
-    if margin < 0.0:
-        raise ConfigurationError("margin cannot be negative")
+    vertical_margin = _vertical_margin(margin, vertical_margin)
 
     center, clearance = safest_point(area.polygon)
     usable_horizontal_radius = clearance - margin
@@ -535,11 +555,11 @@ def generate_straight_and_helix(
     travel_distance = min(4.0, available_travel_distance)
 
     altitude = (area.min_z + area.max_z) / 2.0
-    vertical_room = (area.max_z - area.min_z) / 2.0 - margin
+    vertical_room = (area.max_z - area.min_z) / 2.0 - vertical_margin
     if helix_radius > vertical_room:
         raise ConfigurationError(
             f"helix radius {helix_radius:.2f} m does not fit between the "
-            f"vertical limits with a {margin:.2f} m margin"
+            f"vertical limits with a {vertical_margin:.2f} m vertical margin"
         )
 
     count = math.floor(duration / dt + 1e-9) + 1
@@ -586,12 +606,121 @@ def _trajectory_length(
     )
 
 
+def _vertical_margin(horizontal_margin: float, vertical_margin: float | None) -> float:
+    """Return an explicit vertical margin, preserving the legacy shared default."""
+    if horizontal_margin < 0.0:
+        raise ConfigurationError("horizontal margin cannot be negative")
+    result = horizontal_margin if vertical_margin is None else vertical_margin
+    if result < 0.0:
+        raise ConfigurationError("vertical margin cannot be negative")
+    return result
+
+
+_PLACEMENT_DIRECTIONS = {
+    "center": (0.0, 0.0),
+    "north": (0.0, 1.0),
+    "northeast": (1.0, 1.0),
+    "east": (1.0, 0.0),
+    "southeast": (1.0, -1.0),
+    "south": (0.0, -1.0),
+    "southwest": (-1.0, -1.0),
+    "west": (-1.0, 0.0),
+    "northwest": (-1.0, 1.0),
+}
+
+
+def shift_trajectories_to_boundary(
+    area: SafetyArea,
+    trajectories: Sequence[Sequence[tuple[float, float, float, float]]],
+    direction: str,
+    boundary_offset: float,
+    margin: float,
+) -> tuple[list[tuple[float, float, float, float]], ...]:
+    """Translate complete trajectories toward one safety-area border.
+
+    ``direction`` uses the world frame (east is +x and north is +y). Before
+    placement, the mean XY position across both trajectories is moved to the
+    center of the largest inscribed safety-area circle. The trajectories then
+    move as far as possible while retaining ``margin`` from the polygon, and
+    move back by ``boundary_offset`` metres. Applying translations uniformly
+    to every pose retains all relative geometry and dynamics.
+    """
+    if direction not in _PLACEMENT_DIRECTIONS:
+        choices = ", ".join(_PLACEMENT_DIRECTIONS)
+        raise ConfigurationError(f"unknown placement direction '{direction}'; choose: {choices}")
+    if boundary_offset < 0.0:
+        raise ConfigurationError("boundary offset cannot be negative")
+    if margin < 0.0:
+        raise ConfigurationError("margin cannot be negative")
+    if not trajectories or not all(trajectory for trajectory in trajectories):
+        raise ConfigurationError("cannot place empty trajectories")
+
+    dx, dy = _PLACEMENT_DIRECTIONS[direction]
+    if dx == 0.0 and dy == 0.0:
+        if boundary_offset != 0.0:
+            raise ConfigurationError("boundary offset requires a non-center placement direction")
+        return tuple([tuple(point) for point in trajectory] for trajectory in trajectories)
+    length = math.hypot(dx, dy)
+    dx, dy = dx / length, dy / length
+
+    all_points = [point for trajectory in trajectories for point in trajectory]
+    mean_x = sum(point[0] for point in all_points) / len(all_points)
+    mean_y = sum(point[1] for point in all_points) / len(all_points)
+    circle_center, _ = safest_point(area.polygon)
+    center_dx, center_dy = circle_center[0] - mean_x, circle_center[1] - mean_y
+    centered = tuple(
+        [
+            (point[0] + center_dx, point[1] + center_dy, point[2], point[3])
+            for point in trajectory
+        ]
+        for trajectory in trajectories
+    )
+
+    def fits(shift: float) -> bool:
+        return all(
+            _clearance((point[0] + dx * shift, point[1] + dy * shift), area.polygon)
+            >= margin - 1e-9
+            for trajectory in centered
+            for point in trajectory
+        )
+
+    # A shift farther than the safety area's diagonal puts every point beyond
+    # its bounding box. The original generator guarantees shift 0 fits, and
+    # bisection finds the limiting boundary to sub-micrometre scale.
+    min_x = min(point[0] for point in area.polygon)
+    max_x = max(point[0] for point in area.polygon)
+    min_y = min(point[1] for point in area.polygon)
+    max_y = max(point[1] for point in area.polygon)
+    lower, upper = 0.0, math.hypot(max_x - min_x, max_y - min_y) + 1.0
+    if not fits(lower):
+        raise ConfigurationError("generated trajectory does not satisfy the requested safety margin")
+    for _ in range(60):
+        midpoint = (lower + upper) / 2.0
+        if fits(midpoint):
+            lower = midpoint
+        else:
+            upper = midpoint
+
+    shift = max(0.0, lower - boundary_offset)
+    shifted = tuple(
+        [
+            (point[0] + dx * shift, point[1] + dy * shift, point[2], point[3])
+            for point in trajectory
+        ]
+        for trajectory in centered
+    )
+    if not fits(shift):
+        raise RuntimeError("internal error: boundary placement left the safety area")
+    return shifted
+
+
 def _shift_target_to_minimum_separation(
     area: SafetyArea,
     observer: Sequence[tuple[float, float, float, float]],
     target: Sequence[tuple[float, float, float, float]],
     minimum_distance: float,
     margin: float,
+    vertical_margin: float | None = None,
 ) -> list[tuple[float, float, float, float]]:
     """Contract target offsets so the requested collision-free minimum is exact.
 
@@ -599,6 +728,7 @@ def _shift_target_to_minimum_separation(
     1's camera frame. Consequently FOV validity is unchanged while the closest
     sampled separation becomes exactly ``minimum_distance``.
     """
+    vertical_margin = _vertical_margin(margin, vertical_margin)
     if len(observer) != len(target) or not observer:
         raise RuntimeError("internal error: observer and target samples do not match")
     distances = [
@@ -635,7 +765,7 @@ def _shift_target_to_minimum_separation(
     for point in shifted_target:
         if not (
             _clearance(point[:2], area.polygon) + tolerance >= margin
-            and area.min_z + margin <= point[2] <= area.max_z - margin
+            and area.min_z + vertical_margin <= point[2] <= area.max_z - vertical_margin
         ):
             raise ConfigurationError(
                 "bringing UAV 2 toward UAV 1 would leave the safety area; "
@@ -690,6 +820,7 @@ def generate_dataset_trajectories(
     camera_vertical_fov: float = 60.0,
     relative_heading_turns: float = 1.5,
     margin: float = 0.5,
+    vertical_margin: float | None = None,
     travel_distance: float | None = None,
     observer_path: str = "straight",
     circle_radius: float | None = None,
@@ -715,8 +846,7 @@ def generate_dataset_trajectories(
         raise ConfigurationError("camera vertical FOV must be between 0 and 180 degrees")
     if relative_heading_turns <= 0.0:
         raise ConfigurationError("relative heading turns must be positive")
-    if margin < 0.0:
-        raise ConfigurationError("margin cannot be negative")
+    vertical_margin = _vertical_margin(margin, vertical_margin)
     if travel_distance is not None and travel_distance <= 0.0:
         raise ConfigurationError("travel distance must be positive")
     if circle_radius is not None and circle_radius <= 0.0:
@@ -734,7 +864,7 @@ def generate_dataset_trajectories(
     if clearance <= margin:
         raise ConfigurationError("safety area is smaller than the requested boundary margin")
     altitude = (area.min_z + area.max_z) / 2.0
-    vertical_room = (area.max_z - area.min_z) / 2.0 - margin
+    vertical_room = (area.max_z - area.min_z) / 2.0 - vertical_margin
     if vertical_room <= 0.0:
         raise ConfigurationError("vertical safety area is smaller than twice the margin")
 
@@ -819,7 +949,7 @@ def generate_dataset_trajectories(
         ]
         fits = all(
             _clearance((x, y), area.polygon) + 1e-9 >= margin
-            and area.min_z + margin <= z <= area.max_z - margin
+            and area.min_z + vertical_margin <= z <= area.max_z - vertical_margin
             for trajectory in (observer, target)
             for x, y, z, _ in trajectory
         )
@@ -884,7 +1014,7 @@ def generate_dataset_trajectories(
         raise RuntimeError("internal error: dataset trajectories lie outside the safety area")
     observer, target = trajectories
     target = _shift_target_to_minimum_separation(
-        area, observer, target, minimum_distance, margin
+        area, observer, target, minimum_distance, margin, vertical_margin
     )
     distances = [
         math.sqrt(
@@ -987,6 +1117,7 @@ def generate_static_camera_random_walk(
     camera_horizontal_fov: float = 90.0,
     camera_vertical_fov: float = 60.0,
     margin: float = 0.5,
+    vertical_margin: float | None = None,
     random_seed: int = 1,
     random_waypoints: int = 20,
     camera_placement: str = "circle",
@@ -994,6 +1125,7 @@ def generate_static_camera_random_walk(
     camera_circle_point: str = "north",
     camera_edge_inset: float = 5.0,
     camera_heading: float | None = None,
+    rrt_visualization: RRTVisualization | None = None,
 ) -> tuple[list[tuple[float, float, float, float]], ...]:
     """Generate a static camera and a smooth, non-looping random target path.
 
@@ -1016,8 +1148,7 @@ def generate_static_camera_random_walk(
         raise ConfigurationError("camera horizontal FOV must be between 0 and 180 degrees")
     if not 0.0 < camera_vertical_fov < 180.0:
         raise ConfigurationError("camera vertical FOV must be between 0 and 180 degrees")
-    if margin < 0.0:
-        raise ConfigurationError("margin cannot be negative")
+    vertical_margin = _vertical_margin(margin, vertical_margin)
     if random_waypoints < 4:
         raise ConfigurationError("random walk needs at least four waypoints")
     if camera_placement not in {"circle", "edge"}:
@@ -1035,6 +1166,8 @@ def generate_static_camera_random_walk(
     safe_center, clearance = safest_point(area.polygon)
     if clearance <= margin:
         raise ConfigurationError("safety area is smaller than the requested boundary margin")
+    if (area.max_z - area.min_z) / 2.0 <= vertical_margin:
+        raise ConfigurationError("vertical safety area is smaller than twice the vertical margin")
     if camera_placement == "circle":
         if camera_circle_clearance >= clearance:
             raise ConfigurationError(
@@ -1123,7 +1256,7 @@ def generate_static_camera_random_walk(
         distance = math.sqrt(horizontal * horizontal + dz * dz)
         return (
             _clearance(point[:2], area.polygon) + 1e-9 >= margin
-            and area.min_z + margin <= point[2] <= area.max_z - margin
+            and area.min_z + vertical_margin <= point[2] <= area.max_z - vertical_margin
             and minimum_distance - 1e-8 <= distance <= selected_maximum + 1e-8
             and camera_forward > 0.0
             and abs(math.atan2(camera_left, camera_forward)) <= horizontal_limit + 1e-9
@@ -1153,41 +1286,149 @@ def generate_static_camera_random_walk(
                 pool.append(candidate)
         return pool
 
+    def edge_is_valid(
+        start: tuple[float, float, float], end: tuple[float, float, float]
+    ) -> bool:
+        """Check the local RRT edge, not merely its endpoint."""
+        return all(
+            valid_position(
+                tuple(start[axis] + fraction * (end[axis] - start[axis]) for axis in range(3))
+            )
+            for fraction in (0.2, 0.4, 0.6, 0.8, 1.0)
+        )
+
     target_positions: list[tuple[float, float, float]] | None = None
+    rrt_step = max(1.0, 0.45 * (selected_maximum - minimum_distance))
+    rrt_min_spacing = max(0.25, 0.15 * rrt_step)
     for _ in range(30):
         initial_pool = random_visible_candidates()
         if not initial_pool:
             continue
-        # The target begins from a random valid image location and range, not at
-        # the nearest point in front of the camera.
-        waypoints = [rng.choice(initial_pool)]
-        for _ in range(1, random_waypoints):
-            pool = random_visible_candidates()
-            if not pool:
+        tree = [rng.choice(initial_pool)]
+        parents = [-1]
+        depths = [1]
+        # Sample from the entire visible volume, extend the nearest tree node
+        # toward each sample, and retain only collision/FOV-valid edges.
+        for _ in range(random_waypoints * 120):
+            samples = random_visible_candidates(attempts=1)
+            if not samples:
+                continue
+            sample = samples[0]
+            parent_index = min(
+                range(len(tree)), key=lambda index: math.dist(tree[index], sample)
+            )
+            parent = tree[parent_index]
+            distance = math.dist(parent, sample)
+            if distance < rrt_min_spacing:
+                continue
+            fraction = min(1.0, rrt_step / distance)
+            candidate = tuple(
+                parent[axis] + fraction * (sample[axis] - parent[axis])
+                for axis in range(3)
+            )
+            if (
+                min(math.dist(candidate, node) for node in tree) < rrt_min_spacing
+                or not edge_is_valid(parent, candidate)
+            ):
+                continue
+            tree.append(candidate)
+            parents.append(parent_index)
+            depths.append(depths[parent_index] + 1)
+
+        # Use the RRT nodes as a space-filling frontier, rather than following
+        # one tree branch (which can alternate between two directions). Build
+        # a route through distinct nodes, preferring unexplored space, a useful
+        # step size, and continuation of the current travel direction.
+        waypoints = [tree[0]]
+        available = list(range(1, len(tree)))
+        while available and len(waypoints) < random_waypoints:
+            current = waypoints[-1]
+            candidates = [
+                index for index in available if edge_is_valid(current, tree[index])
+            ]
+            if not candidates:
                 break
 
-            def novelty_score(candidate: tuple[float, float, float]) -> float:
+            def frontier_score(index: int) -> float:
+                candidate = tree[index]
+                step = math.dist(current, candidate)
                 spatial_novelty = min(
-                    math.dist(candidate, old) for old in waypoints
+                    math.dist(candidate, previous) for previous in waypoints
                 ) / selected_maximum
-                candidate_range = math.dist(candidate, (observer_xy[0], observer_xy[1], altitude))
-                range_novelty = min(
-                    abs(candidate_range - math.dist(old, (observer_xy[0], observer_xy[1], altitude)))
-                    for old in waypoints
-                ) / (selected_maximum - minimum_distance)
-                # Each control point samples the full range independently. Favor
-                # both a new position and a new apparent scale, without imposing
-                # a near-to-far sequence.
-                return 0.6 * spatial_novelty + 0.4 * range_novelty + rng.uniform(0.0, 0.05)
+                step_score = min(1.0, step / rrt_step)
+                direction_score = 1.0
+                if len(waypoints) >= 2:
+                    previous = waypoints[-2]
+                    incoming = tuple(current[axis] - previous[axis] for axis in range(3))
+                    outgoing = tuple(candidate[axis] - current[axis] for axis in range(3))
+                    incoming_length = math.sqrt(sum(value * value for value in incoming))
+                    if incoming_length > 1e-9 and step > 1e-9:
+                        cosine = sum(
+                            incoming[axis] * outgoing[axis] for axis in range(3)
+                        ) / (incoming_length * step)
+                        direction_score = (cosine + 1.0) / 2.0
+                return 0.50 * spatial_novelty + 0.30 * step_score + 0.20 * direction_score
 
-            waypoint = max(pool, key=novelty_score)
-            waypoints.append(waypoint)
+            selected = max(candidates, key=frontier_score)
+            waypoints.append(tree[selected])
+            available.remove(selected)
         if len(waypoints) != random_waypoints:
             continue
         candidate_curve = _sample_cubic_bspline(waypoints, count)
         if all(valid_position(point) for point in candidate_curve):
             target_positions = candidate_curve
+            if rrt_visualization is not None:
+                rrt_visualization.points = tree.copy()
+                rrt_visualization.spline_controls = waypoints.copy()
+                rrt_visualization.observer_xy = observer_xy
+                rrt_visualization.observer_heading = observer_heading
+                rrt_visualization.horizontal_fov = camera_horizontal_fov
+                rrt_visualization.minimum_distance = minimum_distance
+                rrt_visualization.maximum_distance = selected_maximum
             break
+    if target_positions is None:
+        # A narrow moving-camera frustum can reject every smoothed RRT branch.
+        # Retain the established diverse sampler as a safe fallback rather than
+        # failing a trajectory that still has a valid visible path.
+        for _ in range(30):
+            initial_pool = random_visible_candidates()
+            if not initial_pool:
+                continue
+            waypoints = [rng.choice(initial_pool)]
+            for _ in range(1, random_waypoints):
+                pool = random_visible_candidates()
+                if not pool:
+                    break
+
+                def fallback_score(candidate: tuple[float, float, float]) -> float:
+                    spatial_novelty = min(
+                        math.dist(candidate, old) for old in waypoints
+                    ) / selected_maximum
+                    step_novelty = math.dist(candidate, waypoints[-1]) / selected_maximum
+                    candidate_range = math.dist(
+                        candidate, (observer_xy[0], observer_xy[1], altitude)
+                    )
+                    range_novelty = min(
+                        abs(
+                            candidate_range
+                            - math.dist(old, (observer_xy[0], observer_xy[1], altitude))
+                        )
+                        for old in waypoints
+                    ) / (selected_maximum - minimum_distance)
+                    return (
+                        0.35 * spatial_novelty
+                        + 0.40 * step_novelty
+                        + 0.25 * range_novelty
+                        + rng.uniform(0.0, 0.05)
+                    )
+
+                waypoints.append(max(pool, key=fallback_score))
+            if len(waypoints) != random_waypoints:
+                continue
+            candidate_curve = _sample_cubic_bspline(waypoints, count)
+            if all(valid_position(point) for point in candidate_curve):
+                target_positions = candidate_curve
+                break
     if target_positions is None:
         raise ConfigurationError(
             "could not fit a smooth random walk in the visible safety area; "
@@ -1201,10 +1442,13 @@ def generate_static_camera_random_walk(
     # The target attitude follows its own smooth random walk rather than its
     # velocity vector. Using unwrapped controls avoids +/-pi discontinuities;
     # headings are wrapped only in the final MRS trajectory samples.
-    heading_controls = [rng.uniform(-math.pi, math.pi)]
+    # Keep attitude variation independent of how many RRT samples were needed
+    # to explore the position space.
+    heading_rng = random.Random(random_seed)
+    heading_controls = [heading_rng.uniform(-math.pi, math.pi)]
     for _ in range(random_waypoints - 1):
         heading_controls.append(
-            heading_controls[-1] + rng.uniform(-0.9 * math.pi, 0.9 * math.pi)
+            heading_controls[-1] + heading_rng.uniform(-0.9 * math.pi, 0.9 * math.pi)
         )
     heading_samples = _sample_cubic_bspline(
         [(heading, 0.0, 0.0) for heading in heading_controls], count
@@ -1213,9 +1457,40 @@ def generate_static_camera_random_walk(
         (*point, _wrap_angle(heading_sample[0]))
         for point, heading_sample in zip(target_positions, heading_samples)
     ]
-    target = _shift_target_to_minimum_separation(
-        area, observer, target, minimum_distance, margin
+    pre_normalization_minimum = min(
+        math.dist(observer_point[:3], target_point[:3])
+        for observer_point, target_point in zip(observer, target)
     )
+    target = _shift_target_to_minimum_separation(
+        area, observer, target, minimum_distance, margin, vertical_margin
+    )
+    if (
+        rrt_visualization is not None
+        and rrt_visualization.observer_xy is not None
+        and pre_normalization_minimum > 0.0
+    ):
+        normalization_scale = minimum_distance / pre_normalization_minimum
+
+        def normalize_planning_point(
+            point: tuple[float, float, float]
+        ) -> tuple[float, float, float]:
+            return (
+                observer_xy[0] + normalization_scale * (point[0] - observer_xy[0]),
+                observer_xy[1] + normalization_scale * (point[1] - observer_xy[1]),
+                altitude + normalization_scale * (point[2] - altitude),
+            )
+
+        if rrt_visualization.points is not None:
+            rrt_visualization.points = [
+                normalize_planning_point(point) for point in rrt_visualization.points
+            ]
+        if rrt_visualization.spline_controls is not None:
+            rrt_visualization.spline_controls = [
+                normalize_planning_point(point)
+                for point in rrt_visualization.spline_controls
+            ]
+        if rrt_visualization.maximum_distance is not None:
+            rrt_visualization.maximum_distance *= normalization_scale
     if _trajectory_length(target) < 0.25:
         raise RuntimeError("internal error: random target trajectory is stationary")
     return observer, target
@@ -1230,6 +1505,7 @@ def generate_moving_camera_random_walk(
     camera_horizontal_fov: float = 90.0,
     camera_vertical_fov: float = 60.0,
     margin: float = 0.5,
+    vertical_margin: float | None = None,
     random_seed: int = 1,
     random_waypoints: int = 20,
     camera_motion_radius: float = 1.0,
@@ -1239,6 +1515,7 @@ def generate_moving_camera_random_walk(
     camera_circle_point: str = "north",
     camera_edge_inset: float = 5.0,
     camera_heading: float | None = None,
+    rrt_visualization: RRTVisualization | None = None,
 ) -> tuple[list[tuple[float, float, float, float]], ...]:
     """Generate a small smooth camera walk and a varied visible target walk.
 
@@ -1246,6 +1523,7 @@ def generate_moving_camera_random_walk(
     observer is displaced by a much smaller B-spline random walk.  This keeps
     the target inside the real front-camera FOV for every sample.
     """
+    vertical_margin = _vertical_margin(margin, vertical_margin)
     if camera_motion_radius <= 0.0:
         raise ConfigurationError("moving-camera radius must be positive")
     if not 0.0 < camera_heading_walk_limit < math.pi / 2.0:
@@ -1270,6 +1548,7 @@ def generate_moving_camera_random_walk(
         camera_horizontal_fov=camera_horizontal_fov * 0.50,
         camera_vertical_fov=camera_vertical_fov * 0.55,
         margin=margin,
+        vertical_margin=vertical_margin,
         random_seed=random_seed,
         random_waypoints=random_waypoints,
         camera_placement=camera_placement,
@@ -1277,6 +1556,7 @@ def generate_moving_camera_random_walk(
         camera_circle_point=camera_circle_point,
         camera_edge_inset=camera_edge_inset,
         camera_heading=camera_heading,
+        rrt_visualization=rrt_visualization,
     )
     base = static_observer[0]
     count = len(target)
@@ -1296,7 +1576,7 @@ def generate_moving_camera_random_walk(
             distance = math.sqrt(horizontal * horizontal + dz * dz)
             if not (
                 _clearance(camera[:2], area.polygon) + 1e-9 >= margin
-                and area.min_z + margin <= camera[2] <= area.max_z - margin
+                and area.min_z + vertical_margin <= camera[2] <= area.max_z - vertical_margin
                 and minimum_distance - 1e-8 <= distance <= selected_maximum + 1e-8
                 and forward_distance > 0.0
                 and abs(math.atan2(left_distance, forward_distance)) <= horizontal_limit + 1e-9
@@ -1339,8 +1619,25 @@ def generate_moving_camera_random_walk(
         ]
         if path_is_valid(observer) and _trajectory_length(observer) >= 0.1:
             shifted_target = _shift_target_to_minimum_separation(
-                area, observer, target, minimum_distance, margin
+                area, observer, target, minimum_distance, margin, vertical_margin
             )
+            if rrt_visualization is not None:
+                # The final target is contracted about a moving observer. Show
+                # sampled final positions at the spline-control times so the
+                # highlighted overlay remains faithful to the written CSV.
+                if rrt_visualization.spline_controls:
+                    control_count = len(rrt_visualization.spline_controls)
+                    rrt_visualization.spline_controls = [
+                        shifted_target[
+                            round(index * (count - 1) / (control_count - 1))
+                        ][:3]
+                        for index in range(control_count)
+                    ]
+                rrt_visualization.observer_xy = observer[0][:2]
+                rrt_visualization.observer_heading = observer[0][3]
+                rrt_visualization.horizontal_fov = camera_horizontal_fov
+                rrt_visualization.minimum_distance = minimum_distance
+                rrt_visualization.maximum_distance = selected_maximum
             return observer, shifted_target
     raise ConfigurationError(
         "could not fit a moving camera random walk in the requested FOV; "
@@ -1354,6 +1651,8 @@ def visualize_trajectories(
     dt: float,
     output_path: Path | None = None,
     show: bool = False,
+    constraints: DynamicConstraints | None = None,
+    rrt_visualization: RRTVisualization | None = None,
 ) -> Any:
     """Plot the trajectory map separately from velocity and other diagnostics.
 
@@ -1362,6 +1661,7 @@ def visualize_trajectories(
     """
     try:
         import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle, Wedge
     except ImportError as exc:
         raise ConfigurationError(
             "trajectory visualization requires Matplotlib; install requirements.txt"
@@ -1369,11 +1669,17 @@ def visualize_trajectories(
 
     trajectory_figure, path_axes = plt.subplots(figsize=(9, 8))
     diagnostics_figure, axes = plt.subplot_mosaic(
-        [["altitude", "distance"], ["velocity", "acceleration"], ["heading", "heading"]],
-        figsize=(14, 13),
+        [
+            ["altitude", "distance"],
+            ["relative", "relative"],
+            ["velocity", "acceleration"],
+            ["heading", "heading"],
+        ],
+        figsize=(14, 16),
     )
     altitude_axes = axes["altitude"]
     distance_axes = axes["distance"]
+    relative_axes = axes["relative"]
     velocity_axes = axes["velocity"]
     acceleration_axes = axes["acceleration"]
     heading_axes = axes["heading"]
@@ -1437,14 +1743,38 @@ def visualize_trajectories(
             math.sqrt(sum(component * component for component in velocity))
             for velocity in velocities
         ]
+        velocity_times = [sample * dt for sample in range(1, len(trajectory))]
         velocity_axes.plot(
-            [sample * dt for sample in range(1, len(trajectory))],
+            velocity_times,
             velocity_magnitudes,
             color=color,
             linestyle=line_style,
             linewidth=2,
             label=label,
         )
+        if constraints is not None:
+            # The MRS profile limits horizontal and vertical velocity separately.
+            # This is the largest valid 3D magnitude for each sample's vertical
+            # direction; full component-wise validation remains authoritative.
+            speed_envelope = [
+                math.hypot(
+                    constraints.horizontal["speed"],
+                    (
+                        constraints.vertical_ascending["speed"]
+                        if velocity[2] >= 0.0
+                        else constraints.vertical_descending["speed"]
+                    ),
+                )
+                for velocity in velocities
+            ]
+            velocity_axes.plot(
+                velocity_times,
+                speed_envelope,
+                color="black",
+                linestyle="--",
+                linewidth=1.5,
+                label=f"UAV {index + 1} combined speed limit",
+            )
         accelerations = [
             tuple((current[axis] - previous[axis]) / dt for axis in range(3))
             for previous, current in zip(velocities, velocities[1:])
@@ -1461,6 +1791,68 @@ def visualize_trajectories(
             linestyle=line_style,
             linewidth=2,
             label=label,
+        )
+
+    if (
+        rrt_visualization is not None
+        and rrt_visualization.points
+        and rrt_visualization.spline_controls
+        and rrt_visualization.observer_xy is not None
+        and rrt_visualization.observer_heading is not None
+        and rrt_visualization.horizontal_fov is not None
+        and rrt_visualization.minimum_distance is not None
+        and rrt_visualization.maximum_distance is not None
+    ):
+        observer_x, observer_y = rrt_visualization.observer_xy
+        max_distance = rrt_visualization.maximum_distance
+        heading_degrees = math.degrees(rrt_visualization.observer_heading)
+        half_fov_degrees = rrt_visualization.horizontal_fov / 2.0
+        path_axes.add_patch(
+            Wedge(
+                (observer_x, observer_y),
+                max_distance,
+                heading_degrees - half_fov_degrees,
+                heading_degrees + half_fov_degrees,
+                color="tab:purple",
+                alpha=0.10,
+                label="planning FOV",
+            )
+        )
+        for radius, style, label in (
+            (rrt_visualization.minimum_distance, ":", "minimum target distance"),
+            (max_distance, "--", "maximum target distance"),
+        ):
+            path_axes.add_patch(
+                Circle(
+                    (observer_x, observer_y),
+                    radius,
+                    fill=False,
+                    color="tab:purple",
+                    linestyle=style,
+                    linewidth=1.2,
+                    alpha=0.8,
+                    label=label,
+                )
+            )
+        path_axes.scatter(
+            [point[0] for point in rrt_visualization.points],
+            [point[1] for point in rrt_visualization.points],
+            color="tab:gray",
+            s=10,
+            alpha=0.5,
+            label="RRT samples",
+            zorder=2,
+        )
+        path_axes.scatter(
+            [point[0] for point in rrt_visualization.spline_controls],
+            [point[1] for point in rrt_visualization.spline_controls],
+            color="tab:red",
+            edgecolor="white",
+            linewidth=0.5,
+            marker="D",
+            s=42,
+            label="RRT spline controls",
+            zorder=4,
         )
 
     path_axes.set_title("Horizontal trajectory")
@@ -1510,11 +1902,36 @@ def visualize_trajectories(
             s=45,
             zorder=3,
         )
+        relative_velocity_components = [
+            [
+                (
+                    (trajectories[1][sample][axis] - trajectories[1][sample - 1][axis])
+                    - (trajectories[0][sample][axis] - trajectories[0][sample - 1][axis])
+                ) / dt
+                for sample in range(1, synchronized_count)
+            ]
+            for axis in range(3)
+        ]
+        for component, label, color in zip(
+            relative_velocity_components,
+            ("Δvx (east)", "Δvy (north)", "Δvz (up)"),
+            ("tab:red", "tab:green", "tab:blue"),
+        ):
+            relative_axes.plot(
+                distance_times[1:], component, color=color, linewidth=2, label=label
+            )
     distance_axes.set_title("Inter-UAV distance")
     distance_axes.set_xlabel("time [s]")
     distance_axes.set_ylabel("distance [m]")
     distance_axes.grid(True, alpha=0.3)
     distance_axes.legend()
+
+    relative_axes.axhline(0.0, color="black", linewidth=1, alpha=0.45)
+    relative_axes.set_title("Relative velocity (UAV 2 − UAV 1)")
+    relative_axes.set_xlabel("time [s]")
+    relative_axes.set_ylabel("velocity [m/s]")
+    relative_axes.grid(True, alpha=0.3)
+    relative_axes.legend()
 
     velocity_axes.set_title("Velocity magnitude")
     velocity_axes.set_xlabel("time [s]")
@@ -1758,7 +2175,40 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "[deg] (default: 12)"
         ),
     )
-    parser.add_argument("--margin", type=float, default=0.5, help="minimum polygon-boundary margin in metres")
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=0.5,
+        help="legacy shared horizontal/vertical safety margin [m] (default: 0.5)",
+    )
+    parser.add_argument(
+        "--horizontal-margin",
+        type=float,
+        help="minimum XY safety-polygon clearance [m]; overrides --margin",
+    )
+    parser.add_argument(
+        "--vertical-margin",
+        type=float,
+        help="minimum clearance from min_z and max_z [m]; overrides --margin",
+    )
+    parser.add_argument(
+        "--placement-direction",
+        choices=tuple(_PLACEMENT_DIRECTIONS),
+        default="center",
+        help=(
+            "translate the completed trajectories toward this world-frame border "
+            "(east = +x, north = +y; default: center)"
+        ),
+    )
+    parser.add_argument(
+        "--boundary-offset",
+        type=float,
+        default=0.0,
+        help=(
+            "extra standoff from the selected boundary [m], in addition to --horizontal-margin "
+            "(default: 0)"
+        ),
+    )
     parser.add_argument(
         "--constraints",
         type=Path,
@@ -1785,11 +2235,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.constraint_profile = (
             "medium" if args.pattern == "dataset-random-walk-moving" else "fast"
         )
+    if args.horizontal_margin is None:
+        args.horizontal_margin = args.margin
+    if args.vertical_margin is None:
+        args.vertical_margin = args.margin
     return args
 
 
 def _generate_from_args(
-    area: SafetyArea, args: argparse.Namespace, duration: float
+    area: SafetyArea,
+    args: argparse.Namespace,
+    duration: float,
+    rrt_visualization: RRTVisualization | None = None,
 ) -> tuple[list[tuple[float, float, float, float]], ...]:
     """Generate the selected spatial path with a supplied duration."""
     if args.pattern == "straight-helix":
@@ -1800,7 +2257,8 @@ def _generate_from_args(
             args.lead_distance,
             args.helix_radius,
             args.helix_turns,
-            args.margin,
+            args.horizontal_margin,
+            args.vertical_margin,
         )
     if args.pattern == "dataset-random-walk-static":
         return generate_static_camera_random_walk(
@@ -1811,7 +2269,8 @@ def _generate_from_args(
             maximum_distance=args.maximum_distance,
             camera_horizontal_fov=args.camera_horizontal_fov,
             camera_vertical_fov=args.camera_vertical_fov,
-            margin=args.margin,
+            margin=args.horizontal_margin,
+            vertical_margin=args.vertical_margin,
             random_seed=args.random_seed,
             random_waypoints=args.random_waypoints,
             camera_placement=args.static_camera_placement,
@@ -1823,6 +2282,7 @@ def _generate_from_args(
                 if args.camera_heading is not None
                 else None
             ),
+            rrt_visualization=rrt_visualization,
         )
     if args.pattern == "dataset-random-walk-moving":
         return generate_moving_camera_random_walk(
@@ -1833,7 +2293,8 @@ def _generate_from_args(
             maximum_distance=args.maximum_distance,
             camera_horizontal_fov=args.camera_horizontal_fov,
             camera_vertical_fov=args.camera_vertical_fov,
-            margin=args.margin,
+            margin=args.horizontal_margin,
+            vertical_margin=args.vertical_margin,
             random_seed=args.random_seed,
             random_waypoints=args.random_waypoints,
             camera_motion_radius=args.moving_camera_radius,
@@ -1847,6 +2308,7 @@ def _generate_from_args(
                 if args.camera_heading is not None
                 else None
             ),
+            rrt_visualization=rrt_visualization,
         )
     if args.pattern.startswith("dataset-"):
         return generate_dataset_trajectories(
@@ -1859,12 +2321,15 @@ def _generate_from_args(
             camera_horizontal_fov=args.camera_horizontal_fov,
             camera_vertical_fov=args.camera_vertical_fov,
             relative_heading_turns=args.relative_heading_turns,
-            margin=args.margin,
+            margin=args.horizontal_margin,
+            vertical_margin=args.vertical_margin,
             travel_distance=args.travel_distance,
             observer_path=args.observer_path,
             circle_radius=args.circle_radius,
         )
-    return generate(area, args.dt, duration, args.separation, args.margin)
+    return generate(
+        area, args.dt, duration, args.separation, args.horizontal_margin, args.vertical_margin
+    )
 
 
 def _verify_trajectories(
@@ -1878,6 +2343,44 @@ def _verify_trajectories(
     ]
 
 
+def _resample_to_fastest_valid_duration(
+    area: SafetyArea,
+    args: argparse.Namespace,
+    longest_valid_duration: float,
+    constraints: DynamicConstraints,
+) -> tuple[float, tuple[list[tuple[float, float, float, float]], ...], list[ConstraintVerification]]:
+    """Find the shortest whole-sample duration that passes every dynamic limit.
+
+    Regenerating at a shorter duration preserves the configured spatial path
+    while resampling it in time. Every candidate is checked through snap and
+    heading derivatives, not just velocity.
+    """
+    longest_sample_count = math.floor(longest_valid_duration / args.dt + 1e-9) + 1
+    minimum_sample_count = 5  # Constraint verification needs derivatives through snap.
+    if longest_sample_count <= minimum_sample_count:
+        trajectories = _generate_from_args(area, args, longest_valid_duration)
+        return (
+            longest_valid_duration,
+            trajectories,
+            _verify_trajectories(trajectories, args.dt, constraints),
+        )
+
+    low, high = minimum_sample_count, longest_sample_count
+    while low < high:
+        sample_count = (low + high) // 2
+        duration = (sample_count - 1) * args.dt
+        trajectories = _generate_from_args(area, args, duration)
+        results = _verify_trajectories(trajectories, args.dt, constraints)
+        if all(result.passed for result in results):
+            high = sample_count
+        else:
+            low = sample_count + 1
+
+    duration = (low - 1) * args.dt
+    trajectories = _generate_from_args(area, args, duration)
+    return duration, trajectories, _verify_trajectories(trajectories, args.dt, constraints)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -1885,7 +2388,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         platform = load_platform_config(args.platform) if args.platform is not None else None
         actual_duration = args.duration
         trajectories = _generate_from_args(area, args, actual_duration)
+        rrt_visualization = (
+            RRTVisualization()
+            if (args.plot is not None or args.show_plot)
+            and args.pattern in {"dataset-random-walk-static", "dataset-random-walk-moving"}
+            else None
+        )
         verification_results: list[ConstraintVerification] = []
+        dynamic_constraints: DynamicConstraints | None = None
         constraints_path = args.constraints
         if constraints_path is None and platform is not None:
             constraints_path = DEFAULT_CONSTRAINTS_PATH
@@ -1909,6 +2419,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verification_results = _verify_trajectories(
                     trajectories, args.dt, dynamic_constraints
                 )
+            if all(result.passed for result in verification_results):
+                actual_duration, trajectories, verification_results = (
+                    _resample_to_fastest_valid_duration(
+                        area, args, actual_duration, dynamic_constraints
+                    )
+                )
             violation_lines: list[str] = []
             violation_count = sum(len(result.violations) for result in verification_results)
             for uav_index, result in enumerate(verification_results, start=1):
@@ -1928,6 +2444,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"dynamic constraints profile '{dynamic_constraints.name}' failed "
                     f"with {violation_count} violating samples:\n  {summary}"
                 )
+        if rrt_visualization is not None:
+            # Regenerate the final time-resampled path once to collect the RRT
+            # planning overlay used by the trajectory map.
+            trajectories = _generate_from_args(
+                area, args, actual_duration, rrt_visualization
+            )
+        unshifted_trajectories = trajectories
+        trajectories = shift_trajectories_to_boundary(
+            area,
+            trajectories,
+            args.placement_direction,
+            args.boundary_offset,
+            args.horizontal_margin,
+        )
+        if rrt_visualization is not None and trajectories and trajectories[0]:
+            shift_x = trajectories[0][0][0] - unshifted_trajectories[0][0][0]
+            shift_y = trajectories[0][0][1] - unshifted_trajectories[0][0][1]
+            if rrt_visualization.points is not None:
+                rrt_visualization.points = [
+                    (point[0] + shift_x, point[1] + shift_y, point[2])
+                    for point in rrt_visualization.points
+                ]
+            if rrt_visualization.spline_controls is not None:
+                rrt_visualization.spline_controls = [
+                    (point[0] + shift_x, point[1] + shift_y, point[2])
+                    for point in rrt_visualization.spline_controls
+                ]
+            if rrt_visualization.observer_xy is not None:
+                rrt_visualization.observer_xy = (
+                    rrt_visualization.observer_xy[0] + shift_x,
+                    rrt_visualization.observer_xy[1] + shift_y,
+                )
         args.output_dir.mkdir(parents=True, exist_ok=True)
         paths = [args.output_dir / "uav1.csv", args.output_dir / "uav2.csv"]
         for path, trajectory in zip(paths, trajectories):
@@ -1938,7 +2486,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.plot is not None:
             plot_path = args.plot if args.plot.is_absolute() else args.output_dir / args.plot
         if plot_path is not None or args.show_plot:
-            visualize_trajectories(area, trajectories, args.dt, plot_path, args.show_plot)
+            visualize_trajectories(
+                area,
+                trajectories,
+                args.dt,
+                plot_path,
+                args.show_plot,
+                dynamic_constraints,
+                rrt_visualization,
+            )
     except (ConfigurationError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1953,8 +2509,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"Duration automatically extended from {args.duration:g} s to "
             f"{actual_duration:g} s to satisfy dynamic constraints"
         )
+    elif actual_duration < args.duration - 1e-9:
+        print(
+            f"Duration resampled from {args.duration:g} s to {actual_duration:g} s "
+            "to use the available dynamic-constraint headroom"
+        )
     print(f"Trajectories: {paths[0]}, {paths[1]}")
     print(f"Loader config: {config_path}")
+    if args.placement_direction != "center":
+        print(
+            f"Placement: {args.placement_direction}; boundary offset: "
+            f"{args.boundary_offset:g} m (plus {args.horizontal_margin:g} m horizontal margin)"
+        )
     if args.pattern.startswith("dataset-"):
         distances = [
             math.dist(observer[:3], target[:3])

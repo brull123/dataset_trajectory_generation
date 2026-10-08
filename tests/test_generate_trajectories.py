@@ -6,6 +6,7 @@ from pathlib import Path
 from generate_trajectories import (
     _clearance,
     _trajectory_length,
+    RRTVisualization,
     generate,
     generate_dataset_lissajous,
     generate_dataset_orbit,
@@ -19,6 +20,7 @@ from generate_trajectories import (
     main,
     parse_args,
     safest_point,
+    shift_trajectories_to_boundary,
     validate_platform_constraint_profile,
     verify_dynamic_constraints,
     visualize_trajectories,
@@ -57,6 +59,51 @@ mrs_uav_managers:
         self.assertEqual(len(trajectories[0]), 6)
         self.assertTrue(all(point[2] == 3.0 for trajectory in trajectories for point in trajectory))
 
+    def test_shifts_completed_trajectories_to_requested_boundary_with_offset(self):
+        path = self._config(
+            """
+safety_area:
+  horizontal:
+    frame_name: world_origin
+    points: [-5, -5, 5, -5, 5, 5, -5, 5]
+  vertical: {min_z: 1, max_z: 5}
+"""
+        )
+        area = load_safety_area(path)
+        trajectories = (
+            [(0.0, -1.0, 3.0, 0.0), (0.0, 1.0, 3.0, 0.2)],
+            [(1.0, -1.0, 3.0, -0.1), (1.0, 1.0, 3.0, 0.3)],
+        )
+
+        shifted = shift_trajectories_to_boundary(
+            area, trajectories, "south", boundary_offset=1.0, margin=0.5
+        )
+
+        self.assertAlmostEqual(min(point[1] for trajectory in shifted for point in trajectory), -3.5)
+        self.assertEqual([point[0] for point in shifted[0]], [-0.5, -0.5])
+        self.assertEqual(
+            [point[2:] for point in shifted[1]], [point[2:] for point in trajectories[1]]
+        )
+
+    def test_boundary_placement_arguments_are_parsed(self):
+        args = parse_args(
+            ["world.yaml", "--placement-direction", "east", "--boundary-offset", "2"]
+        )
+        self.assertEqual(args.placement_direction, "east")
+        self.assertEqual(args.boundary_offset, 2.0)
+
+    def test_directional_margins_override_legacy_shared_margin(self):
+        args = parse_args(
+            [
+                "world.yaml",
+                "--margin", "1",
+                "--horizontal-margin", "2",
+                "--vertical-margin", "3",
+            ]
+        )
+        self.assertEqual(args.horizontal_margin, 2.0)
+        self.assertEqual(args.vertical_margin, 3.0)
+
     def test_converts_latlon_polygon_to_world_origin_metres(self):
         path = self._config(
             """
@@ -93,26 +140,40 @@ safety_area:
         )
         area = load_safety_area(path)
         trajectories = generate(area, dt=0.2, duration=1.0, separation=2.0, margin=0.5)
+        constraints = load_dynamic_constraints(
+            Path(__file__).parents[1] / "constraints" / "mrs_default.yaml", "fast"
+        )
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "trajectory.png"
-            figure = visualize_trajectories(area, trajectories, dt=0.2, output_path=output)
+            figure = visualize_trajectories(
+                area, trajectories, dt=0.2, output_path=output, constraints=constraints
+            )
             diagnostics = figure.diagnostics_figure
 
             self.assertTrue(output.is_file())
             self.assertTrue((Path(directory) / "trajectory_diagnostics.png").is_file())
             self.assertGreater(output.stat().st_size, 1_000)
             self.assertEqual(len(figure.axes), 1)
-            self.assertEqual(len(diagnostics.axes), 5)
+            self.assertEqual(len(diagnostics.axes), 6)
             distance_axes = diagnostics.axes[1]
-            velocity_axes = diagnostics.axes[2]
-            acceleration_axes = diagnostics.axes[3]
-            heading_axes = diagnostics.axes[4]
+            relative_axes = diagnostics.axes[2]
+            velocity_axes = diagnostics.axes[3]
+            acceleration_axes = diagnostics.axes[4]
+            heading_axes = diagnostics.axes[5]
             self.assertEqual(distance_axes.get_title(), "Inter-UAV distance")
             self.assertIn("minimum = 2.00 m", distance_axes.get_legend_handles_labels()[1])
+            self.assertEqual(relative_axes.get_title(), "Relative velocity (UAV 2 − UAV 1)")
+            self.assertEqual(len(relative_axes.lines), 4)
+            self.assertTrue(
+                all(len(line.get_xdata()) == len(trajectories[0]) - 1 for line in relative_axes.lines[:3])
+            )
             self.assertEqual(velocity_axes.get_title(), "Velocity magnitude")
-            self.assertEqual(len(velocity_axes.lines), 2)
+            self.assertEqual(len(velocity_axes.lines), 4)
             self.assertTrue(
                 all(len(line.get_ydata()) == len(trajectories[0]) - 1 for line in velocity_axes.lines)
+            )
+            self.assertIn(
+                "UAV 1 combined speed limit", velocity_axes.get_legend_handles_labels()[1]
             )
             self.assertEqual(acceleration_axes.get_title(), "Acceleration magnitude")
             self.assertEqual(len(acceleration_axes.lines), 2)
@@ -341,7 +402,10 @@ safety_area:
             random_seed=42,
             random_waypoints=10,
         )
-        observer, target = generate_static_camera_random_walk(**arguments)
+        rrt_visualization = RRTVisualization()
+        observer, target = generate_static_camera_random_walk(
+            **arguments, rrt_visualization=rrt_visualization
+        )
         repeated_observer, repeated_target = generate_static_camera_random_walk(**arguments)
         _, different_target = generate_static_camera_random_walk(
             **{**arguments, "random_seed": 43}
@@ -350,6 +414,8 @@ safety_area:
         self.assertEqual(observer, repeated_observer)
         self.assertEqual(target, repeated_target)
         self.assertNotEqual(target, different_target)
+        self.assertGreater(len(rrt_visualization.points or []), 10)
+        self.assertEqual(len(rrt_visualization.spline_controls or []), 10)
         self.assertEqual(len(set(observer)), 1)
         circle_center, circle_clearance = safest_point(area.polygon)
         self.assertAlmostEqual(observer[0][0], circle_center[0])
