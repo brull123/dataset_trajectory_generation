@@ -1286,6 +1286,9 @@ def generate_static_camera_random_walk(
                 pool.append(candidate)
         return pool
 
+    def observer_distance(point: tuple[float, float, float]) -> float:
+        return math.dist(point, (observer_xy[0], observer_xy[1], altitude))
+
     def edge_is_valid(
         start: tuple[float, float, float], end: tuple[float, float, float]
     ) -> bool:
@@ -1304,7 +1307,7 @@ def generate_static_camera_random_walk(
         initial_pool = random_visible_candidates()
         if not initial_pool:
             continue
-        tree = [rng.choice(initial_pool)]
+        tree = [min(initial_pool, key=observer_distance)]
         parents = [-1]
         depths = [1]
         # Sample from the entire visible volume, extend the nearest tree node
@@ -1336,12 +1339,17 @@ def generate_static_camera_random_walk(
             depths.append(depths[parent_index] + 1)
 
         # Use the RRT nodes as a space-filling frontier, rather than following
-        # one tree branch (which can alternate between two directions). Build
-        # a route through distinct nodes, preferring unexplored space, a useful
-        # step size, and continuation of the current travel direction.
-        waypoints = [tree[0]]
-        available = list(range(1, len(tree)))
-        while available and len(waypoints) < random_waypoints:
+        # one tree branch (which can alternate between two directions). Anchor
+        # the route at the closest and farthest reachable samples, so the spline
+        # spans the plausible distance volume before normalizing to min distance.
+        nearest_index = min(range(len(tree)), key=lambda index: observer_distance(tree[index]))
+        farthest_index = max(range(len(tree)), key=lambda index: observer_distance(tree[index]))
+        waypoints = [tree[nearest_index]]
+        available = [
+            index for index in range(len(tree))
+            if index not in {nearest_index, farthest_index}
+        ]
+        while available and len(waypoints) < random_waypoints - 1:
             current = waypoints[-1]
             candidates = [
                 index for index in available if edge_is_valid(current, tree[index])
@@ -1372,8 +1380,9 @@ def generate_static_camera_random_walk(
             selected = max(candidates, key=frontier_score)
             waypoints.append(tree[selected])
             available.remove(selected)
-        if len(waypoints) != random_waypoints:
+        if len(waypoints) != random_waypoints - 1:
             continue
+        waypoints.append(tree[farthest_index])
         candidate_curve = _sample_cubic_bspline(waypoints, count)
         if all(valid_position(point) for point in candidate_curve):
             target_positions = candidate_curve
@@ -1618,26 +1627,50 @@ def generate_moving_camera_random_walk(
             for offset, heading_offset in zip(offsets, heading_offsets)
         ]
         if path_is_valid(observer) and _trajectory_length(observer) >= 0.1:
+            pre_normalization_minimum = min(
+                math.dist(observer_point[:3], target_point[:3])
+                for observer_point, target_point in zip(observer, target)
+            )
             shifted_target = _shift_target_to_minimum_separation(
                 area, observer, target, minimum_distance, margin, vertical_margin
             )
             if rrt_visualization is not None:
-                # The final target is contracted about a moving observer. Show
-                # sampled final positions at the spline-control times so the
-                # highlighted overlay remains faithful to the written CSV.
-                if rrt_visualization.spline_controls:
-                    control_count = len(rrt_visualization.spline_controls)
-                    rrt_visualization.spline_controls = [
-                        shifted_target[
-                            round(index * (count - 1) / (control_count - 1))
-                        ][:3]
-                        for index in range(control_count)
-                    ]
+                # Keep actual selected RRT controls visible. A cubic B-spline
+                # is not an interpolating curve, so its interior does not pass
+                # through those controls; they define the control polygon.
                 rrt_visualization.observer_xy = observer[0][:2]
                 rrt_visualization.observer_heading = observer[0][3]
                 rrt_visualization.horizontal_fov = camera_horizontal_fov
                 rrt_visualization.minimum_distance = minimum_distance
-                rrt_visualization.maximum_distance = selected_maximum
+                moving_normalization_scale = minimum_distance / pre_normalization_minimum
+                if rrt_visualization.points is not None:
+                    rrt_visualization.points = [
+                        (
+                            observer[0][0]
+                            + moving_normalization_scale * (point[0] - base[0]),
+                            observer[0][1]
+                            + moving_normalization_scale * (point[1] - base[1]),
+                            observer[0][2]
+                            + moving_normalization_scale * (point[2] - base[2]),
+                        )
+                        for point in rrt_visualization.points
+                    ]
+                if rrt_visualization.spline_controls is not None:
+                    rrt_visualization.spline_controls = [
+                        (
+                            observer[0][0]
+                            + moving_normalization_scale * (point[0] - base[0]),
+                            observer[0][1]
+                            + moving_normalization_scale * (point[1] - base[1]),
+                            observer[0][2]
+                            + moving_normalization_scale * (point[2] - base[2]),
+                        )
+                        for point in rrt_visualization.spline_controls
+                    ]
+                rrt_visualization.maximum_distance = (
+                    (rrt_visualization.maximum_distance or selected_maximum)
+                    * moving_normalization_scale
+                )
             return observer, shifted_target
     raise ConfigurationError(
         "could not fit a moving camera random walk in the requested FOV; "
@@ -1853,6 +1886,16 @@ def visualize_trajectories(
             s=42,
             label="RRT spline controls",
             zorder=4,
+        )
+        path_axes.plot(
+            [point[0] for point in rrt_visualization.spline_controls],
+            [point[1] for point in rrt_visualization.spline_controls],
+            color="tab:red",
+            linestyle=":",
+            linewidth=1,
+            alpha=0.7,
+            label="RRT control polygon",
+            zorder=3,
         )
 
     path_axes.set_title("Horizontal trajectory")
@@ -2343,44 +2386,6 @@ def _verify_trajectories(
     ]
 
 
-def _resample_to_fastest_valid_duration(
-    area: SafetyArea,
-    args: argparse.Namespace,
-    longest_valid_duration: float,
-    constraints: DynamicConstraints,
-) -> tuple[float, tuple[list[tuple[float, float, float, float]], ...], list[ConstraintVerification]]:
-    """Find the shortest whole-sample duration that passes every dynamic limit.
-
-    Regenerating at a shorter duration preserves the configured spatial path
-    while resampling it in time. Every candidate is checked through snap and
-    heading derivatives, not just velocity.
-    """
-    longest_sample_count = math.floor(longest_valid_duration / args.dt + 1e-9) + 1
-    minimum_sample_count = 5  # Constraint verification needs derivatives through snap.
-    if longest_sample_count <= minimum_sample_count:
-        trajectories = _generate_from_args(area, args, longest_valid_duration)
-        return (
-            longest_valid_duration,
-            trajectories,
-            _verify_trajectories(trajectories, args.dt, constraints),
-        )
-
-    low, high = minimum_sample_count, longest_sample_count
-    while low < high:
-        sample_count = (low + high) // 2
-        duration = (sample_count - 1) * args.dt
-        trajectories = _generate_from_args(area, args, duration)
-        results = _verify_trajectories(trajectories, args.dt, constraints)
-        if all(result.passed for result in results):
-            high = sample_count
-        else:
-            low = sample_count + 1
-
-    duration = (low - 1) * args.dt
-    trajectories = _generate_from_args(area, args, duration)
-    return duration, trajectories, _verify_trajectories(trajectories, args.dt, constraints)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -2418,12 +2423,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 trajectories = _generate_from_args(area, args, actual_duration)
                 verification_results = _verify_trajectories(
                     trajectories, args.dt, dynamic_constraints
-                )
-            if all(result.passed for result in verification_results):
-                actual_duration, trajectories, verification_results = (
-                    _resample_to_fastest_valid_duration(
-                        area, args, actual_duration, dynamic_constraints
-                    )
                 )
             violation_lines: list[str] = []
             violation_count = sum(len(result.violations) for result in verification_results)
@@ -2508,11 +2507,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"Duration automatically extended from {args.duration:g} s to "
             f"{actual_duration:g} s to satisfy dynamic constraints"
-        )
-    elif actual_duration < args.duration - 1e-9:
-        print(
-            f"Duration resampled from {args.duration:g} s to {actual_duration:g} s "
-            "to use the available dynamic-constraint headroom"
         )
     print(f"Trajectories: {paths[0]}, {paths[1]}")
     print(f"Loader config: {config_path}")

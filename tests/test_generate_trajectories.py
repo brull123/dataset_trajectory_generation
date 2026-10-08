@@ -443,10 +443,11 @@ safety_area:
                 abs(math.degrees(math.atan2(dz, math.hypot(dx, dy)))),
                 24.0 + 1e-8,
             )
-        # The target starts at a random valid range and controls do not progress
-        # monotonically from near to far.
-        self.assertGreater(distances[0], 5.0 + 0.1)
+        # The RRT route begins near the closest reachable sample and ends near
+        # the farthest one, so it spans the useful target-distance volume.
+        self.assertAlmostEqual(distances[0], 5.0)
         self.assertAlmostEqual(min(distances), 5.0)
+        self.assertGreater(max(distances), 15.0)
         self.assertLessEqual(max(distances), 25.0 + 1e-8)
         distance_changes = [
             following - previous

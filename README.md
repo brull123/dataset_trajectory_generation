@@ -58,9 +58,9 @@ horizontal FOV plus its minimum and maximum target-distance bounds.
 
 When a constraints profile is active (`--constraints` or `--platform`), the
 velocity diagnostics also show the applicable combined horizontal/vertical
-speed envelope. After extending a path if necessary, the generator resamples
-it to the shortest duration that satisfies every enabled speed, acceleration,
-jerk, snap, and heading constraint.
+speed envelope. When a path exceeds a dynamic limit, the generator preserves
+its spatial path and extends its duration until every enabled speed,
+acceleration, jerk, snap, and heading constraint is satisfied.
 
 ## Command-line parameter reference
 

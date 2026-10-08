@@ -4,7 +4,7 @@ python3 generate_trajectories.py worlds/world_temesvar_field_2.yaml \
        	--static-camera-circle-clearance 5 \
       	--static-camera-circle-point west\
       	--minimum-distance 5.0\
-       	--maximum-distance 30.0 \
+       	--maximum-distance 50.0 \
        	--random-seed 36 \
 	--show-plot\
 	--plot \
