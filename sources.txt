@@ -1,0 +1,3 @@
+safety_area definitions: https://github.com/ctu-mrs/mrs_uav_deployment/tree/d7f530150142a10e8ed60605c241e846e16b7e24/config/worlds
+control manager: https://github.com/ctu-mrs/mrs_uav_managers
+dynamic constraints: https://github.com/ctu-mrs/mrs_uav_managers/blob/ros2/config/public/constraint_manager/constraints.yaml

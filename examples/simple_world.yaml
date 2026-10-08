@@ -1,0 +1,14 @@
+world_origin:
+  units: "LATLON"
+  origin_x: 50.0764041
+  origin_y: 14.4180359
+
+safety_area:
+  enabled: true
+  horizontal:
+    frame_name: "world_origin"
+    points: [-5.0, -4.0, 5.0, -4.0, 5.0, 4.0, -5.0, 4.0]
+  vertical:
+    frame_name: "world_origin"
+    min_z: 1.0
+    max_z: 5.0

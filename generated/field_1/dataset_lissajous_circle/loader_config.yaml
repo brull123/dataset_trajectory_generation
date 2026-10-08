@@ -1,0 +1,7 @@
+trajectory:
+  frame_id: world_origin
+  dt: 0.2
+  loop: false
+  use_heading: true
+  fly_now: false
+  offset: [0.0, 0.0, 0.0, 0.0]

@@ -1,0 +1,25 @@
+# MRS ConstraintManager-compatible example using the upstream "slow" defaults.
+mrs_uav_managers:
+  constraint_manager:
+    slow:
+      horizontal:
+        speed: 1.0
+        acceleration: 1.0
+        jerk: 20.0
+        snap: 20.0
+      vertical:
+        ascending:
+          speed: 1.0
+          acceleration: 1.0
+          jerk: 20.0
+          snap: 20.0
+        descending:
+          speed: 1.0
+          acceleration: 1.0
+          jerk: 20.0
+          snap: 20.0
+      heading:
+        speed: 0.5
+        acceleration: 1.0
+        jerk: 10.0
+        snap: 10.0

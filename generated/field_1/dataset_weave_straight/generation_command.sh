@@ -1,0 +1,1 @@
+python3 generate_trajectories.py worlds/world_temesvar_field_1.yaml --platform platforms/x500.yaml --constraint-profile medium --pattern dataset-weave --observer-path straight --minimum-distance 5 --maximum-distance 15 --travel-distance 40 --duration 30 --output-dir generated/field_1/dataset_weave_straight --plot
