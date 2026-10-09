@@ -1563,11 +1563,11 @@ def generate_moving_camera_random_walk(
     camera_heading: float | None = None,
     rrt_visualization: RRTVisualization | None = None,
 ) -> tuple[list[tuple[float, float, float, float]], ...]:
-    """Generate a small smooth camera walk and a varied visible target walk.
+    """Generate a moving camera after planning a target path in its initial FOV.
 
-    The target is generated with conservative FOV and range reserves, then the
-    observer is displaced by a much smaller B-spline random walk.  This keeps
-    the target inside the real front-camera FOV for every sample.
+    The observer then follows an independent small B-spline random walk. Later
+    target samples may leave the moved camera's FOV, while safety and distance
+    bounds remain valid.
     """
     vertical_margin = _vertical_margin(margin, vertical_margin)
     if camera_motion_radius <= 0.0:
@@ -1582,17 +1582,16 @@ def generate_moving_camera_random_walk(
             "maximum distance must leave room for the moving-camera radius"
         )
 
-    # Reserve distance and angular room for the observer's small displacement.
-    # The static generator's 80%-of-FOV design is further narrowed here before
-    # checking the final paths against the user-requested FOV.
+    # Plan the target in the initial camera's complete requested FOV. Camera
+    # movement is intentionally independent of later target visibility.
     static_observer, target = generate_static_camera_random_walk(
         area=area,
         dt=dt,
         duration=duration,
         minimum_distance=minimum_distance + camera_motion_radius,
         maximum_distance=selected_maximum - camera_motion_radius,
-        camera_horizontal_fov=camera_horizontal_fov * 0.50,
-        camera_vertical_fov=camera_vertical_fov * 0.55,
+        camera_horizontal_fov=camera_horizontal_fov,
+        camera_vertical_fov=camera_vertical_fov,
         margin=margin,
         vertical_margin=vertical_margin,
         random_seed=random_seed,
@@ -1607,8 +1606,6 @@ def generate_moving_camera_random_walk(
     base = static_observer[0]
     count = len(target)
     heading = base[3]
-    horizontal_limit = math.radians(camera_horizontal_fov) * 0.5
-    vertical_limit = math.radians(camera_vertical_fov) * 0.5
     rng = random.Random(random_seed + 100_003)
 
     def path_is_valid(observer: Sequence[tuple[float, float, float, float]]) -> bool:
@@ -1616,17 +1613,11 @@ def generate_moving_camera_random_walk(
             dx = target_point[0] - camera[0]
             dy = target_point[1] - camera[1]
             dz = target_point[2] - camera[2]
-            forward_distance = dx * math.cos(camera[3]) + dy * math.sin(camera[3])
-            left_distance = -dx * math.sin(camera[3]) + dy * math.cos(camera[3])
-            horizontal = math.hypot(dx, dy)
-            distance = math.sqrt(horizontal * horizontal + dz * dz)
+            distance = math.sqrt(dx * dx + dy * dy + dz * dz)
             if not (
                 _clearance(camera[:2], area.polygon) + 1e-9 >= margin
                 and area.min_z + vertical_margin <= camera[2] <= area.max_z - vertical_margin
                 and minimum_distance - 1e-8 <= distance <= selected_maximum + 1e-8
-                and forward_distance > 0.0
-                and abs(math.atan2(left_distance, forward_distance)) <= horizontal_limit + 1e-9
-                and abs(math.atan2(dz, horizontal)) <= vertical_limit + 1e-9
             ):
                 return False
         return True
@@ -1710,7 +1701,7 @@ def generate_moving_camera_random_walk(
                 )
             return observer, shifted_target
     raise ConfigurationError(
-        "could not fit a moving camera random walk in the requested FOV; "
+        "could not fit a moving camera random walk within safety and distance bounds; "
         "reduce --moving-camera-radius, increase distance, or use circle placement"
     )
 

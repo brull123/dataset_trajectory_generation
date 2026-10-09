@@ -488,7 +488,7 @@ safety_area:
         )
         self.assertAlmostEqual(west_observer[0][3], 0.0)
 
-    def test_moving_camera_random_walk_stays_visible_and_meets_medium_constraints(self):
+    def test_moving_camera_random_walk_starts_visible_and_meets_medium_constraints(self):
         root = Path(__file__).parents[1]
         area = load_safety_area(root / "worlds" / "world_temesvar_field_1.yaml")
         arguments = dict(
@@ -519,6 +519,26 @@ safety_area:
         ]
         self.assertAlmostEqual(min(distances), 5.0)
         self.assertLessEqual(max(distances), 25.0 + 1e-8)
+        initial_camera, initial_target = observer[0], target[0]
+        initial_dx = initial_target[0] - initial_camera[0]
+        initial_dy = initial_target[1] - initial_camera[1]
+        initial_dz = initial_target[2] - initial_camera[2]
+        initial_forward = (
+            initial_dx * math.cos(initial_camera[3])
+            + initial_dy * math.sin(initial_camera[3])
+        )
+        initial_left = (
+            -initial_dx * math.sin(initial_camera[3])
+            + initial_dy * math.cos(initial_camera[3])
+        )
+        self.assertGreater(initial_forward, 0.0)
+        self.assertLessEqual(
+            abs(math.degrees(math.atan2(initial_left, initial_forward))), 45.0 + 1e-8
+        )
+        self.assertLessEqual(
+            abs(math.degrees(math.atan2(initial_dz, math.hypot(initial_dx, initial_dy)))),
+            30.0 + 1e-8,
+        )
         constraints = load_dynamic_constraints(root / "constraints" / "mrs_default.yaml", "medium")
         self.assertTrue(verify_dynamic_constraints(observer, 0.2, constraints).passed)
         self.assertTrue(verify_dynamic_constraints(target, 0.2, constraints).passed)

@@ -227,10 +227,10 @@ Use `dataset-random-walk-moving` when the filming UAV should move too. UAV 1
 follows a smooth randomized B-spline bounded by `--moving-camera-radius`
 (1 m by default), so its magnitude stays much smaller than UAV 2's varied
 motion. Its front-camera heading also follows a separate smooth bounded random
-walk (up to `--moving-camera-heading-walk`, 12 degrees by default). The
-generator reserves range and FOV margin before moving or rotating the camera,
-then validates every resulting target sample against the requested FOV and
-distance bounds. This pattern selects the `medium` constraints profile unless
+walk (up to `--moving-camera-heading-walk`, 12 degrees by default). The target
+path is generated inside the initial camera FOV. Once camera motion begins,
+the target is allowed to leave that FOV; safety-area and distance bounds remain
+validated. This pattern selects the `medium` constraints profile unless
 `--constraint-profile` is supplied explicitly.
 
 ```bash
