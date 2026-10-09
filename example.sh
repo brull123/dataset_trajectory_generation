@@ -1,4 +1,4 @@
-ORIENTATION="northeast"
+ORIENTATION="northwest"
 python3 generate_trajectories.py worlds/world_temesvar_field_123.yaml \
 	--platform platforms/x500.yaml\
       	--pattern dataset-random-walk-moving  \
