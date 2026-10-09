@@ -160,6 +160,7 @@ safety_area:
             self.assertTrue((Path(directory) / "trajectory_diagnostics.png").is_file())
             self.assertGreater(output.stat().st_size, 1_000)
             self.assertEqual(len(figure.axes), 1)
+            self.assertLess(figure.axes[0].get_xlim()[1] - figure.axes[0].get_xlim()[0], 10.0)
             self.assertEqual(len(diagnostics.axes), 6)
             distance_axes = diagnostics.axes[1]
             relative_axes = diagnostics.axes[2]
@@ -606,7 +607,7 @@ safety_area:
             )
 
             self.assertEqual(result, 0)
-            self.assertGreater(len((output / "uav1.csv").read_text().splitlines()), 151)
+            self.assertGreater(len((output / "uav1.txt").read_text().splitlines()), 151)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ the duration; the requested spatial paths were preserved.
 | `dataset_orbit_straight` | 40 m straight path | 40.2 s | 202 | `dataset_orbit_straight/generation_command.sh` |
 | `dataset_lissajous_circle` | 10 m-radius circle | 65.4 s | 328 | `dataset_lissajous_circle/generation_command.sh` |
 
-Each dataset directory contains `uav1.csv`, `uav2.csv`,
+Each dataset directory contains `uav1.txt`, `uav2.txt`,
 `loader_config.yaml`, `trajectories.png`, and the exact generation command.
 Run all three again from the repository root with:
 

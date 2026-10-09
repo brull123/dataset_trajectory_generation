@@ -1750,6 +1750,28 @@ def visualize_trajectories(
     path_axes.fill(polygon_x, polygon_y, color="tab:green", alpha=0.12, label="Safety area")
     path_axes.plot(polygon_x, polygon_y, color="tab:green", linewidth=2)
 
+    trajectory_xy = [
+        point[:2]
+        for trajectory in trajectories
+        for point in trajectory
+    ]
+    if trajectory_xy:
+        trajectory_min_x = min(point[0] for point in trajectory_xy)
+        trajectory_max_x = max(point[0] for point in trajectory_xy)
+        trajectory_min_y = min(point[1] for point in trajectory_xy)
+        trajectory_max_y = max(point[1] for point in trajectory_xy)
+        trajectory_span = max(
+            trajectory_max_x - trajectory_min_x,
+            trajectory_max_y - trajectory_min_y,
+            1.0,
+        )
+    else:
+        trajectory_min_x = min(polygon_x)
+        trajectory_max_x = max(polygon_x)
+        trajectory_min_y = min(polygon_y)
+        trajectory_max_y = max(polygon_y)
+        trajectory_span = max(trajectory_max_x - trajectory_min_x, trajectory_max_y - trajectory_min_y)
+
     colors = ("tab:blue", "tab:orange")
     for index, trajectory in enumerate(trajectories):
         if not trajectory:
@@ -1766,10 +1788,7 @@ def visualize_trajectories(
         path_axes.scatter(x_values[-1], y_values[-1], color=color, marker="X", s=70)
         arrow_step = max(1, len(trajectory) // 8)
         arrow_indices = range(0, len(trajectory), arrow_step)
-        plot_span = max(
-            max(polygon_x) - min(polygon_x), max(polygon_y) - min(polygon_y)
-        )
-        arrow_length = plot_span * 0.035
+        arrow_length = trajectory_span * 0.035
         path_axes.quiver(
             [x_values[sample] for sample in arrow_indices],
             [y_values[sample] for sample in arrow_indices],
@@ -1929,6 +1948,9 @@ def visualize_trajectories(
     path_axes.set_title("Horizontal trajectory")
     path_axes.set_xlabel(f"x [m] ({area.frame_id})")
     path_axes.set_ylabel("y [m]")
+    trajectory_padding = max(0.5, trajectory_span * 0.08)
+    path_axes.set_xlim(trajectory_min_x - trajectory_padding, trajectory_max_x + trajectory_padding)
+    path_axes.set_ylim(trajectory_min_y - trajectory_padding, trajectory_max_y + trajectory_padding)
     path_axes.set_aspect("equal", adjustable="box")
     path_axes.grid(True, alpha=0.3)
     path_axes.legend()
@@ -2561,7 +2583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     rrt_visualization.observer_xy[1] + shift_y,
                 )
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        paths = [args.output_dir / "uav1.csv", args.output_dir / "uav2.csv"]
+        paths = [args.output_dir / "uav1.txt", args.output_dir / "uav2.txt"]
         for path, trajectory in zip(paths, trajectories):
             _write_trajectory(path, trajectory)
         config_path = args.output_dir / "loader_config.yaml"

@@ -23,8 +23,8 @@ python3 generate_trajectories.py /path/to/world_config.yaml
 
 By default this creates:
 
-- `generated/uav1.csv`
-- `generated/uav2.csv`
+- `generated/uav1.txt`
+- `generated/uav2.txt`
 - `generated/loader_config.yaml`
 
 Add `--plot` to also create `generated/trajectories.png`:
@@ -80,7 +80,7 @@ times are in seconds.
 | `CONFIG` | required | all patterns | Path to an MRS world or safety-area YAML file. Both the older top-level and newer `mrs_uav_managers` layouts are supported. |
 | `-h`, `--help` | — | command line | Print the generated command-line help and exit. |
 | `--platform PATH` | unset | all patterns | Load an MRS platform overlay such as `platforms/x500.yaml`, validate that the selected constraints profile is permitted, and enable checking with the bundled upstream MRS profiles when `--constraints` is omitted. |
-| `--output-dir PATH` | `generated` | all patterns | Directory for `uav1.csv`, `uav2.csv`, `loader_config.yaml`, and a relative plot path. |
+| `--output-dir PATH` | `generated` | all patterns | Directory for `uav1.txt`, `uav2.txt`, `loader_config.yaml`, and a relative plot path. |
 | `--dt SECONDS` | `0.2` | all patterns | Time between trajectory samples. It must be at least 0.01 s for the MRS MPC tracker. |
 | `--duration SECONDS` | `500` | all patterns | Initial trajectory duration. The number of samples is `floor(duration / dt) + 1`. When constraint checking fails, duration is extended automatically without changing the spatial path. |
 | `--pattern NAME` | `parallel` | all patterns | Select `parallel`, `straight-helix`, `dataset-weave`, `dataset-orbit`, `dataset-lissajous`, `dataset-random-walk-static`, or `dataset-random-walk-moving`. |
@@ -331,7 +331,7 @@ loader. Load each CSV for the corresponding UAV, for example with ROS 2:
 
 ```bash
 UAV_NAME=uav1 ros2 launch mrs_uav_trajectory_loader trajectory_loader.launch.py \
-  traj_file:=$PWD/generated/uav1.csv custom_config:=$PWD/generated/loader_config.yaml
+  traj_file:=$PWD/generated/uav1.txt custom_config:=$PWD/generated/loader_config.yaml
 ```
 
 Review the trajectories in simulation before flight. Useful options are:
