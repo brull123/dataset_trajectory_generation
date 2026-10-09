@@ -655,14 +655,6 @@ def shift_trajectories_to_boundary(
     if not trajectories or not all(trajectory for trajectory in trajectories):
         raise ConfigurationError("cannot place empty trajectories")
 
-    dx, dy = _PLACEMENT_DIRECTIONS[direction]
-    if dx == 0.0 and dy == 0.0:
-        if boundary_offset != 0.0:
-            raise ConfigurationError("boundary offset requires a non-center placement direction")
-        return tuple([tuple(point) for point in trajectory] for trajectory in trajectories)
-    length = math.hypot(dx, dy)
-    dx, dy = dx / length, dy / length
-
     all_points = [point for trajectory in trajectories for point in trajectory]
     mean_x = sum(point[0] for point in all_points) / len(all_points)
     mean_y = sum(point[1] for point in all_points) / len(all_points)
@@ -675,6 +667,25 @@ def shift_trajectories_to_boundary(
         ]
         for trajectory in trajectories
     )
+
+    def centered_fits() -> bool:
+        return all(
+            _clearance(point[:2], area.polygon) >= margin - 1e-9
+            for trajectory in centered
+            for point in trajectory
+        )
+
+    dx, dy = _PLACEMENT_DIRECTIONS[direction]
+    if dx == 0.0 and dy == 0.0:
+        if boundary_offset != 0.0:
+            raise ConfigurationError("boundary offset requires a non-center placement direction")
+        if not centered_fits():
+            raise ConfigurationError(
+                "centering the generated trajectory would leave the requested safety margin"
+            )
+        return centered
+    length = math.hypot(dx, dy)
+    dx, dy = dx / length, dy / length
 
     def fits(shift: float) -> bool:
         return all(
@@ -2583,7 +2594,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     rrt_visualization.observer_xy[1] + shift_y,
                 )
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        paths = [args.output_dir / "uav65.txt", args.output_dir / "uav67.txt"]
+        paths = [args.output_dir / "uav1.txt", args.output_dir / "uav2.txt"]
         for path, trajectory in zip(paths, trajectories):
             _write_trajectory(path, trajectory)
         config_path = args.output_dir / "loader_config.yaml"

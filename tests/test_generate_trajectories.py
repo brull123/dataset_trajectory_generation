@@ -78,9 +78,15 @@ safety_area:
         shifted = shift_trajectories_to_boundary(
             area, trajectories, "south", boundary_offset=1.0, margin=0.5
         )
+        centered = shift_trajectories_to_boundary(
+            area, trajectories, "center", boundary_offset=0.0, margin=0.5
+        )
 
         self.assertAlmostEqual(min(point[1] for trajectory in shifted for point in trajectory), -3.5)
         self.assertEqual([point[0] for point in shifted[0]], [-0.5, -0.5])
+        centered_points = [point for trajectory in centered for point in trajectory]
+        self.assertAlmostEqual(sum(point[0] for point in centered_points) / len(centered_points), 0.0)
+        self.assertAlmostEqual(sum(point[1] for point in centered_points) / len(centered_points), 0.0)
         self.assertEqual(
             [point[2:] for point in shifted[1]], [point[2:] for point in trajectories[1]]
         )
