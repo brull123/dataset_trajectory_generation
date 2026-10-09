@@ -2583,7 +2583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     rrt_visualization.observer_xy[1] + shift_y,
                 )
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        paths = [args.output_dir / "uav1.txt", args.output_dir / "uav2.txt"]
+        paths = [args.output_dir / "uav65.txt", args.output_dir / "uav67.txt"]
         for path, trajectory in zip(paths, trajectories):
             _write_trajectory(path, trajectory)
         config_path = args.output_dir / "loader_config.yaml"
